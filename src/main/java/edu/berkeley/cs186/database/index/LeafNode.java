@@ -228,11 +228,9 @@ class LeafNode extends BPlusNode {
             this.rids.add(recordId);
         }
 
-        // current leaf node is full but data is present
+        // current leaf node is full (fillFactorFull keys) but data is present
         if(data.hasNext()) {
-            // overflow
             Pair<DataBox, RecordId> dataBoxRecordIdPair = data.next();
-
             DataBox dataBox = dataBoxRecordIdPair.getFirst();
             RecordId recordId = dataBoxRecordIdPair.getSecond();
 
@@ -244,13 +242,17 @@ class LeafNode extends BPlusNode {
             this.keys.add(dataBox);
             this.rids.add(recordId);
 
-            List<DataBox> leftKeys = this.keys.subList(0, fillFactorFull);
-            List<DataBox> rightKeys = new ArrayList<>();
-            rightKeys.add(keys.get(keys.size() - 1));
+            // In bulk load, overflow is when we exceed fillFactorFull (not 2d)
+            if (this.keys.size() <= fillFactorFull) {
+                this.sync();
+                return Optional.empty();
+            }
 
+            // overflow: split so left has fillFactorFull, right has the rest
+            List<DataBox> leftKeys = this.keys.subList(0, fillFactorFull);
+            List<DataBox> rightKeys = new ArrayList<>(this.keys.subList(fillFactorFull, this.keys.size()));
             List<RecordId> leftRids = this.rids.subList(0, fillFactorFull);
-            List<RecordId> rightRids = new ArrayList<>();
-            rightRids.add(rids.get(rids.size() - 1));
+            List<RecordId> rightRids = new ArrayList<>(this.rids.subList(fillFactorFull, this.rids.size()));
 
             this.keys = leftKeys;
             this.rids = leftRids;

@@ -470,6 +470,213 @@ public class TestBPlusTree {
         }
     }
 
+    // ========== Unit tests for get/put/scans/iterator/bulkLoad (recent commits) ==========
+
+    @Test
+    @Category(PublicTests.class)
+    public void testGetEmptyTree() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        assertEquals(Optional.empty(), tree.get(new IntDataBox(0)));
+        assertEquals(Optional.empty(), tree.get(new IntDataBox(100)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testScanAllEmptyTree() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        List<RecordId> result = indexIteratorToList(tree::scanAll);
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testScanGreaterEqualEmptyTree() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        List<RecordId> result = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(0)));
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testScanGreaterEqualKeyLargerThanAll() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        tree.put(new IntDataBox(1), new RecordId(1, (short) 1));
+        tree.put(new IntDataBox(2), new RecordId(2, (short) 2));
+        tree.put(new IntDataBox(3), new RecordId(3, (short) 3));
+        List<RecordId> result = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(10)));
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testScanGreaterEqualKeySmallerThanAll() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        List<RecordId> expected = new ArrayList<>();
+        for (int i = 10; i < 20; i++) {
+            tree.put(new IntDataBox(i), new RecordId(i, (short) i));
+            expected.add(new RecordId(i, (short) i));
+        }
+        List<RecordId> result = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(0)));
+        assertEquals(expected, result);
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testScanGreaterEqualExactKey() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        tree.put(new IntDataBox(5), new RecordId(5, (short) 5));
+        tree.put(new IntDataBox(10), new RecordId(10, (short) 10));
+        tree.put(new IntDataBox(15), new RecordId(15, (short) 15));
+        List<RecordId> result = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(10)));
+        assertEquals(Arrays.asList(new RecordId(10, (short) 10), new RecordId(15, (short) 15)), result);
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testIteratorAcrossMultipleLeaves() {
+        // Order 2 -> max 4 keys per leaf. Insert enough to force multiple leaves.
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        List<RecordId> expected = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            tree.put(new IntDataBox(i), new RecordId(i, (short) i));
+            expected.add(new RecordId(i, (short) i));
+        }
+        assertEquals(expected, indexIteratorToList(tree::scanAll));
+        // scanGreaterEqual from middle
+        List<RecordId> fromFive = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(5)));
+        assertEquals(expected.subList(5, 12), fromFive);
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testPutCausesRootSplitThenGetAndScan() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 1);
+        // With order 1, a few inserts will split and create new root.
+        for (int i = 0; i < 8; i++) {
+            tree.put(new IntDataBox(i), new RecordId(i, (short) i));
+        }
+        for (int i = 0; i < 8; i++) {
+            assertEquals(Optional.of(new RecordId(i, (short) i)), tree.get(new IntDataBox(i)));
+        }
+        List<RecordId> all = indexIteratorToList(tree::scanAll);
+        assertEquals(8, all.size());
+        for (int i = 0; i < 8; i++) {
+            assertEquals(new RecordId(i, (short) i), all.get(i));
+        }
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testRemoveThenGet() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        tree.put(new IntDataBox(7), new RecordId(7, (short) 7));
+        assertEquals(Optional.of(new RecordId(7, (short) 7)), tree.get(new IntDataBox(7)));
+        tree.remove(new IntDataBox(7));
+        assertEquals(Optional.empty(), tree.get(new IntDataBox(7)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testLoadFromDiskAfterPuts() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        List<RecordId> expected = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            tree.put(new IntDataBox(i), new RecordId(i, (short) i));
+            expected.add(new RecordId(i, (short) i));
+        }
+        BPlusTree fromDisk = new BPlusTree(bufferManager, metadata, treeContext);
+        assertEquals(expected, indexIteratorToList(fromDisk::scanAll));
+        for (int i = 0; i < 20; i++) {
+            assertEquals(Optional.of(new RecordId(i, (short) i)), fromDisk.get(new IntDataBox(i)));
+        }
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testBulkLoadThenScanAndGet() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        float fillFactor = 0.75f;
+        List<Pair<DataBox, RecordId>> data = new ArrayList<>();
+        List<RecordId> expected = new ArrayList<>();
+        for (int i = 0; i < 15; i++) {
+            data.add(new Pair<>(new IntDataBox(i), new RecordId(i, (short) i)));
+            expected.add(new RecordId(i, (short) i));
+        }
+        tree.bulkLoad(data.iterator(), fillFactor);
+        assertEquals(expected, indexIteratorToList(tree::scanAll));
+        for (int i = 0; i < 15; i++) {
+            assertEquals(Optional.of(new RecordId(i, (short) i)), tree.get(new IntDataBox(i)));
+        }
+        List<RecordId> fromSeven = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(7)));
+        assertEquals(expected.subList(7, 15), fromSeven);
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testBulkLoadThenLoadFromDisk() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        List<Pair<DataBox, RecordId>> data = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            data.add(new Pair<>(new IntDataBox(i), new RecordId(i, (short) i)));
+        }
+        tree.bulkLoad(data.iterator(), 0.75f);
+        BPlusTree fromDisk = new BPlusTree(bufferManager, metadata, treeContext);
+        List<RecordId> expected = new ArrayList<>();
+        for (int i = 0; i < 11; i++) {
+            expected.add(new RecordId(i, (short) i));
+        }
+        assertEquals(expected, indexIteratorToList(fromDisk::scanAll));
+    }
+
+    @Test(expected = BPlusTreeException.class)
+    @Category(PublicTests.class)
+    public void testBulkLoadNonEmptyTreeThrows() {
+        // Implementation throws only when root is an InnerNode (root != root.getLeftmostLeaf()).
+        // With order 2, a leaf holds at most 4 keys; 5th insert causes root to become InnerNode.
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        for (int i = 0; i < 5; i++) {
+            tree.put(new IntDataBox(i), new RecordId(i, (short) i));
+        }
+        List<Pair<DataBox, RecordId>> data = new ArrayList<>();
+        data.add(new Pair<>(new IntDataBox(10), new RecordId(10, (short) 10)));
+        tree.bulkLoad(data.iterator(), 0.5f);
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testScanGreaterEqualBoundaryBetweenLeaves() {
+        // Order 2: fill one leaf (e.g. 4 keys), then add more so we have 2+ leaves.
+        // Query with key equal to first key of second leaf.
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        for (int i = 0; i < 8; i++) {
+            tree.put(new IntDataBox(i), new RecordId(i, (short) i));
+        }
+        List<RecordId> fromFour = indexIteratorToList(() -> tree.scanGreaterEqual(new IntDataBox(4)));
+        assertEquals(4, fromFour.size());
+        assertEquals(new RecordId(4, (short) 4), fromFour.get(0));
+        assertEquals(new RecordId(7, (short) 7), fromFour.get(3));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testGetNonexistentKeyInNonEmptyTree() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        tree.put(new IntDataBox(1), new RecordId(1, (short) 1));
+        tree.put(new IntDataBox(3), new RecordId(3, (short) 3));
+        assertEquals(Optional.empty(), tree.get(new IntDataBox(0)));
+        assertEquals(Optional.empty(), tree.get(new IntDataBox(2)));
+        assertEquals(Optional.empty(), tree.get(new IntDataBox(5)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testRemoveNonexistentKeyNoOp() {
+        BPlusTree tree = getBPlusTree(Type.intType(), 2);
+        tree.put(new IntDataBox(1), new RecordId(1, (short) 1));
+        tree.remove(new IntDataBox(2)); // not present
+        assertEquals(Optional.of(new RecordId(1, (short) 1)), tree.get(new IntDataBox(1)));
+    }
+
     @Test
     @Category(SystemTests.class)
     public void testMaxOrder() {

@@ -330,4 +330,43 @@ public class TestLeafNode {
             assertEquals(leaf, LeafNode.fromBytes(metadata, bufferManager, treeContext, pageNum));
         }
     }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testFromBytesWithNoRightSibling() {
+        // Tests that a leaf with no right sibling (rightmost leaf) round-trips
+        // correctly via fromBytes. The sentinel INVALID_PAGE_NUM must be
+        // deserialized as Optional.empty(), not Optional.of(-1).
+        int d = 5;
+        setBPlusTreeMetadata(Type.intType(), d);
+
+        List<DataBox> keys = new ArrayList<>();
+        List<RecordId> rids = new ArrayList<>();
+        keys.add(new IntDataBox(1));
+        rids.add(new RecordId(1, (short) 1));
+
+        LeafNode leaf = new LeafNode(metadata, bufferManager, keys, rids, Optional.empty(), treeContext);
+        long pageNum = leaf.getPage().getPageNum();
+
+        LeafNode fromDisk = LeafNode.fromBytes(metadata, bufferManager, treeContext, pageNum);
+        assertEquals(leaf, fromDisk);
+        assertFalse("Right sibling should be empty for rightmost leaf", fromDisk.getRightSibling().isPresent());
+        assertEquals(Optional.of(r1), fromDisk.getKey(new IntDataBox(1)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testFromBytesEmptyLeafNoRightSibling() {
+        // Edge case: completely empty leaf with no right sibling (e.g. brand new tree).
+        int d = 2;
+        setBPlusTreeMetadata(Type.intType(), d);
+        LeafNode leaf = new LeafNode(metadata, bufferManager,
+                new ArrayList<>(), new ArrayList<>(), Optional.empty(), treeContext);
+        long pageNum = leaf.getPage().getPageNum();
+        LeafNode fromDisk = LeafNode.fromBytes(metadata, bufferManager, treeContext, pageNum);
+        assertEquals(leaf, fromDisk);
+        assertFalse(fromDisk.getRightSibling().isPresent());
+        assertTrue(fromDisk.getKeys().isEmpty());
+        assertTrue(fromDisk.getRids().isEmpty());
+    }
 }
