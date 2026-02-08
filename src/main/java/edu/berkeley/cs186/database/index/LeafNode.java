@@ -5,12 +5,16 @@ import edu.berkeley.cs186.database.common.Pair;
 import edu.berkeley.cs186.database.concurrency.LockContext;
 import edu.berkeley.cs186.database.databox.DataBox;
 import edu.berkeley.cs186.database.databox.Type;
+import edu.berkeley.cs186.database.io.DiskSpaceManager;
 import edu.berkeley.cs186.database.memory.BufferManager;
 import edu.berkeley.cs186.database.memory.Page;
 import edu.berkeley.cs186.database.table.RecordId;
 
 import java.nio.ByteBuffer;
+import java.security.Key;
 import java.util.*;
+
+import static java.lang.Math.ceil;
 
 /**
  * A leaf of a B+ tree. Every leaf in a B+ tree of order d stores between d and
@@ -146,42 +150,145 @@ class LeafNode extends BPlusNode {
     // See BPlusNode.get.
     @Override
     public LeafNode get(DataBox key) {
-        // TODO(proj2): implement
-
-        return null;
+        return this;
     }
 
     // See BPlusNode.getLeftmostLeaf.
     @Override
     public LeafNode getLeftmostLeaf() {
-        // TODO(proj2): implement
-
-        return null;
+        return this;
     }
 
     // See BPlusNode.put.
     @Override
     public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) {
-        // TODO(proj2): implement
+        // check if key is present
+        if(this.keys.contains(key)) {
+            throw new BPlusTreeException("Inserting Duplicate Key!");
+        }
 
-        return Optional.empty();
+        int d = this.metadata.getOrder(); // order of tree
+
+        int insertionIndex = InnerNode.numLessThan(key, keys);
+        this.keys.add(insertionIndex, key);
+        this.rids.add(insertionIndex, rid);
+
+        // check for overflow
+        if (2*d >= keys.size()) {
+            this.sync();
+            return Optional.empty();
+        }
+
+        // Split into d, d+1 entries
+        List<DataBox> leftKeys = this.keys.subList(0, d);
+        List<DataBox> rightKeys = this.keys.subList(d, 2*d + 1);
+
+        List<RecordId> leftRids = this.rids.subList(0, d);
+        List<RecordId> rightRids = this.rids.subList(d, 2*d + 1);
+
+        // create new node
+        LeafNode newNode = new LeafNode(metadata, bufferManager, rightKeys, rightRids, this.rightSibling, treeContext);
+        long newNodePageNum = newNode.getPage().getPageNum();
+
+        // update current node after split
+        this.keys = leftKeys;
+        this.rids = leftRids;
+        this.rightSibling = Optional.of(newNodePageNum);
+
+        // leafNode update sync with buffer
+        this.sync();
+
+        return Optional.of(
+                new Pair<>(rightKeys.get(0), newNodePageNum)
+        );
     }
 
     // See BPlusNode.bulkLoad.
     @Override
-    public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data,
-            float fillFactor) {
-        // TODO(proj2): implement
+    public Optional<Pair<DataBox, Long>> bulkLoad(
+            Iterator<Pair<DataBox, RecordId>> data,
+            float fillFactor
+    ) {
 
+        int d = this.metadata.getOrder();
+        int fillFactorFull = (int) ceil(2 * d * fillFactor);
+
+        while(data.hasNext() && this.keys.size() < fillFactorFull) {
+            Pair<DataBox, RecordId> dataBoxRecordIdPair = data.next();
+
+            DataBox dataBox = dataBoxRecordIdPair.getFirst();
+            RecordId recordId = dataBoxRecordIdPair.getSecond();
+
+            // check for duplicate key
+            if(this.keys.contains(dataBox)) {
+                throw new BPlusTreeException("Duplicate key detected!");
+            }
+
+            this.keys.add(dataBox);
+            this.rids.add(recordId);
+        }
+
+        // current leaf node is full but data is present
+        if(data.hasNext()) {
+            // overflow
+            Pair<DataBox, RecordId> dataBoxRecordIdPair = data.next();
+
+            DataBox dataBox = dataBoxRecordIdPair.getFirst();
+            RecordId recordId = dataBoxRecordIdPair.getSecond();
+
+            // check for duplicate key
+            if(this.keys.contains(dataBox)) {
+                throw new BPlusTreeException("Duplicate key detected!");
+            }
+
+            this.keys.add(dataBox);
+            this.rids.add(recordId);
+
+            List<DataBox> leftKeys = this.keys.subList(0, fillFactorFull);
+            List<DataBox> rightKeys = new ArrayList<>();
+            rightKeys.add(keys.get(keys.size() - 1));
+
+            List<RecordId> leftRids = this.rids.subList(0, fillFactorFull);
+            List<RecordId> rightRids = new ArrayList<>();
+            rightRids.add(rids.get(rids.size() - 1));
+
+            this.keys = leftKeys;
+            this.rids = leftRids;
+
+            LeafNode newLeafNode = new LeafNode(metadata, bufferManager, rightKeys, rightRids, rightSibling, treeContext);
+            long newLeafNodePageNum = newLeafNode.getPage().getPageNum();
+
+            this.rightSibling = Optional.of(newLeafNodePageNum);
+            this.sync();
+
+            return Optional.of(
+                    new Pair<>(
+                            newLeafNode.getKeys().get(0), newLeafNodePageNum
+                    )
+            );
+        }
+
+        this.sync();
         return Optional.empty();
     }
 
     // See BPlusNode.remove.
     @Override
     public void remove(DataBox key) {
-        // TODO(proj2): implement
+        if(this.keys.isEmpty()) {
+            return;
+        }
 
-        return;
+        int i = keys.indexOf(key);
+        if (i == -1) {
+            return;
+        }
+
+        keys.remove(i);
+        rids.remove(i);
+
+        // call sync
+        sync();
     }
 
     // Iterators ///////////////////////////////////////////////////////////////
@@ -358,7 +465,7 @@ class LeafNode extends BPlusNode {
 
         ByteBuffer buf = ByteBuffer.allocate(size);
         buf.put((byte) 1);
-        buf.putLong(rightSibling.orElse(-1L));
+        buf.putLong(rightSibling.orElse(DiskSpaceManager.INVALID_PAGE_NUM));
         buf.putInt(keys.size());
         for (int i = 0; i < keys.size(); ++i) {
             buf.put(keys.get(i).toBytes());
@@ -389,8 +496,14 @@ class LeafNode extends BPlusNode {
         List<DataBox> keys = new ArrayList<>();
         List<RecordId> rids = new ArrayList<>();
 
-        long pageId = buf.getLong();
-        Optional<Long> rightSibling = Optional.of(pageId);
+        long rightSiblingPageId = buf.getLong();
+
+        // If right sibling is not present, it's pageId is stored as -1
+        // In this case, make it empty optional
+        Optional<Long> rightSibling = Optional.empty();
+        if(rightSiblingPageId != DiskSpaceManager.INVALID_PAGE_NUM) {
+            rightSibling = Optional.of(rightSiblingPageId);
+        }
 
         int numKeys = buf.getInt();
         for (int i = 0; i < numKeys; ++i) {

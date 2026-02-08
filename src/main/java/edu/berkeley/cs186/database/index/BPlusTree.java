@@ -14,6 +14,7 @@ import edu.berkeley.cs186.database.table.RecordId;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.security.Key;
 import java.util.*;
 
 /**
@@ -146,8 +147,12 @@ public class BPlusTree {
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
         // TODO(proj2): implement
+        LeafNode leafNode = this.root.get(key);
+        if (Objects.isNull(leafNode)) {
+            return Optional.empty();
+        }
 
-        return Optional.empty();
+        return leafNode.getKey(key);
     }
 
     /**
@@ -201,9 +206,13 @@ public class BPlusTree {
         // TODO(proj4_integration): Update the following line
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
-        // TODO(proj2): Return a BPlusTreeIterator.
+        LeafNode leftMostLeafNode = this.root.getLeftmostLeaf();
+        BPlusTreeIterator bPlusTreeIterator = new BPlusTreeIterator(
+                leftMostLeafNode.scanAll(),
+                leftMostLeafNode
+        );
 
-        return Collections.emptyIterator();
+        return bPlusTreeIterator;
     }
 
     /**
@@ -234,9 +243,12 @@ public class BPlusTree {
         // TODO(proj4_integration): Update the following line
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
-        // TODO(proj2): Return a BPlusTreeIterator.
+        if (Objects.isNull(this.root)) {
+            return Collections.emptyIterator();
+        }
 
-        return Collections.emptyIterator();
+        LeafNode leftLeafNode = this.root.get(key);
+        return new BPlusTreeIterator(leftLeafNode.scanGreaterEqual(key), leftLeafNode);
     }
 
     /**
@@ -253,12 +265,26 @@ public class BPlusTree {
         // TODO(proj4_integration): Update the following line
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
-        // TODO(proj2): implement
-        // Note: You should NOT update the root variable directly.
-        // Use the provided updateRoot() helper method to change
-        // the tree's root if the old root splits.
+        Optional<Pair<DataBox, Long>> rootInsertionOverflowInfo = this.root.put(key, rid);
+        // check for overflow
+        if(!rootInsertionOverflowInfo.isPresent()) {
+            return;
+        }
 
-        return;
+        DataBox pushedUpKey = rootInsertionOverflowInfo.get().getFirst();
+        Long newNodePageNum = rootInsertionOverflowInfo.get().getSecond();
+
+        List<DataBox> newKeys = new ArrayList<>();
+        newKeys.add(pushedUpKey);
+
+        List<Long> newChildren = new ArrayList<>();
+        // current root will become a child
+        newChildren.add(this.root.getPage().getPageNum());
+        // the newly created node will also become a child of the new root
+        newChildren.add(newNodePageNum);
+
+        InnerNode newTreeRoot = new InnerNode(metadata, bufferManager, newKeys, newChildren, lockContext);
+        updateRoot(newTreeRoot);
     }
 
     /**
@@ -284,10 +310,31 @@ public class BPlusTree {
         // TODO(proj4_integration): Update the following line
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
-        // TODO(proj2): implement
-        // Note: You should NOT update the root variable directly.
-        // Use the provided updateRoot() helper method to change
-        // the tree's root if the old root splits.
+        // condition for empty tree, since root is initialized as a leaf node
+        if(this.root != this.root.getLeftmostLeaf()) {
+            throw new BPlusTreeException("Bulk loading not possible for non-empty B+ tree");
+        }
+
+        while(data.hasNext()) {
+            Optional<Pair<DataBox, Long>> pushedUpInfo = this.root.bulkLoad(data, fillFactor);
+
+            if(pushedUpInfo.isPresent()) {
+                DataBox pushedUpKey = pushedUpInfo.get().getFirst(); // pushedUp key
+                Long newInnerNodePageNum = pushedUpInfo.get().getSecond(); // newly created inner node's (at below level) page num
+
+                List<DataBox> newKeys = new ArrayList<>();
+                List<Long> newChildren = new ArrayList<>();
+
+                // current root will become a child of pushed up node, which will become the new root
+                // since new node is coming from right subtree, root will be in left subtree
+                newKeys.add(pushedUpKey);
+                newChildren.add(this.root.getPage().getPageNum());
+                newChildren.add(newInnerNodePageNum);
+
+                InnerNode newTreeRoot = new InnerNode(metadata, bufferManager, newKeys, newChildren, lockContext);
+                updateRoot(newTreeRoot);
+            }
+        }
 
         return;
     }
@@ -308,8 +355,7 @@ public class BPlusTree {
         // TODO(proj4_integration): Update the following line
         LockUtil.ensureSufficientLockHeld(lockContext, LockType.NL);
 
-        // TODO(proj2): implement
-
+        this.root.remove(key);
         return;
     }
 
@@ -422,20 +468,36 @@ public class BPlusTree {
 
     // Iterator ////////////////////////////////////////////////////////////////
     private class BPlusTreeIterator implements Iterator<RecordId> {
-        // TODO(proj2): Add whatever fields and constructors you want here.
+        Iterator<RecordId> it;
+        LeafNode currentLeafNode;
+
+        public BPlusTreeIterator(Iterator<RecordId> it, LeafNode leafNode) {
+            this.it = it;
+            this.currentLeafNode = leafNode;
+        }
 
         @Override
         public boolean hasNext() {
-            // TODO(proj2): implement
+            if(this.it.hasNext() || this.currentLeafNode.getRightSibling().isPresent()) {
+                return true;
+            }
 
             return false;
         }
 
         @Override
         public RecordId next() {
-            // TODO(proj2): implement
+            if(!hasNext()) {
+                throw new NoSuchElementException();
+            }
+            if(this.it.hasNext()) {
+                return this.it.next();
+            }
 
-            throw new NoSuchElementException();
+            this.currentLeafNode = this.currentLeafNode.getRightSibling().get();
+            this.it = this.currentLeafNode.scanAll();
+
+            return this.it.next();
         }
     }
 }
