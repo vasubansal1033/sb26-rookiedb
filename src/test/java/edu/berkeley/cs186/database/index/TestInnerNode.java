@@ -362,7 +362,7 @@ public class TestInnerNode {
     @Category(SystemTests.class)
     public void testnumLessThan() {
         List<Integer> empty = Collections.emptyList();
-        assertEquals(0, InnerNode.numLessThanEqual(0, empty));
+        assertEquals(0, InnerNode.numLessThan(0, empty));
 
         List<Integer> contiguous = Arrays.asList(1, 2, 3, 4, 5);
         assertEquals(0, InnerNode.numLessThan(0, contiguous));
@@ -414,5 +414,135 @@ public class TestInnerNode {
             InnerNode parsed = InnerNode.fromBytes(metadata, bufferManager, treeContext, pageNum);
             assertEquals(inner, parsed);
         }
+    }
+
+    // ========== Additional tests for InnerNode get/put/remove/bulkLoad ==========
+
+    @Test
+    @Category(PublicTests.class)
+    public void testGetBoundaryKeys() {
+        // Key 10 is separator: should route to right subtree (leaf1). Key 20 to leaf2.
+        LeafNode leaf1 = getLeaf(this.leaf1);
+        LeafNode leaf2 = getLeaf(this.leaf2);
+        assertEquals(leaf1, inner.get(new IntDataBox(10)));
+        assertEquals(leaf2, inner.get(new IntDataBox(20)));
+        // Keys just below boundary
+        assertEquals(getLeaf(leaf0), inner.get(new IntDataBox(9)));
+        assertEquals(leaf1, inner.get(new IntDataBox(19)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testPutCausesLeafSplit() {
+        // Order 2: leaf holds max 4 keys. Leaf0 has [1,2,3]. Add 0 and 4 -> 5 keys -> split.
+        inner.put(new IntDataBox(4), new RecordId(4, (short) 4));
+        inner.put(new IntDataBox(0), new RecordId(0, (short) 0));
+        // Inner should have gained one key and one child (split pushed up).
+        assertEquals(3, inner.getKeys().size());
+        assertEquals(4, inner.getChildren().size());
+        assertTrue(inner.getKeys().contains(new IntDataBox(2))); // pushed up from leaf split
+        // All keys 0,1,2,3,4 should be findable in the left subtree
+        LeafNode leafFor0 = inner.get(new IntDataBox(0));
+        LeafNode leafFor2 = inner.get(new IntDataBox(2));
+        assertEquals(Optional.of(new RecordId(0, (short) 0)), leafFor0.getKey(new IntDataBox(0)));
+        assertEquals(Optional.of(new RecordId(1, (short) 1)), leafFor0.getKey(new IntDataBox(1)));
+        assertEquals(Optional.of(new RecordId(2, (short) 2)), leafFor2.getKey(new IntDataBox(2)));
+        assertEquals(Optional.of(new RecordId(3, (short) 3)), leafFor2.getKey(new IntDataBox(3)));
+        assertEquals(Optional.of(new RecordId(4, (short) 4)), leafFor2.getKey(new IntDataBox(4)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testPutCausesInnerNodeSplit() {
+        // Fill so inner has 2d keys (4 for d=2), then one more put causes inner to split.
+        // Leaf0: add 0,4 -> split (keys 0,1,2,3,4 -> push 2). Inner: [2,10,20], 4 children.
+        inner.put(new IntDataBox(4), new RecordId(4, (short) 4));
+        inner.put(new IntDataBox(0), new RecordId(0, (short) 0));
+        // Leaf1: has 11,12,13. Add 14,15 -> 5 keys -> split. Push 14. Inner: [2,10,14,20], 5 children.
+        inner.put(new IntDataBox(14), new RecordId(14, (short) 14));
+        inner.put(new IntDataBox(15), new RecordId(15, (short) 15));
+        // Now inner has 4 keys. One more child split and inner overflows. Trigger by splitting leaf2.
+        inner.put(new IntDataBox(24), new RecordId(24, (short) 24));
+        inner.put(new IntDataBox(25), new RecordId(25, (short) 25));
+        // After inner split, our "inner" reference is the LEFT part only (keys [2,10], 3 children).
+        // Child 0 = leaf [0,1], child 1 = leaf [2,3,4], child 2 = leaf1 [11,12].
+        // Keys 13,14,15 are in newLeaf1 (child 3), which is in the RIGHT inner node after split.
+        // Keys 20+ are also in the right inner node. Key 10 is a separator, not in any leaf.
+        assertEquals(2, inner.getKeys().size());
+        assertEquals(3, inner.getChildren().size());
+        for (int k : new int[]{0, 1, 2, 3, 4, 11, 12}) {
+            LeafNode leaf = inner.get(new IntDataBox(k));
+            assertEquals(Optional.of(new RecordId(k, (short) k)), leaf.getKey(new IntDataBox(k)));
+        }
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testRemoveNonexistentKey() {
+        inner.remove(new IntDataBox(100));
+        inner.remove(new IntDataBox(-1));
+        checkTreeMatchesExpectations();
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testBulkLoadLastChildSplits() {
+        // Bulk load into rightmost child (leaf2, keys 21,22,23). Use only 24,25,26 so that
+        // the last leaf splits once (into [21,22,23] and [24,25,26]) but the inner does NOT
+        // split — otherwise "inner" would point to the left half and keys 24+ wouldn't be reachable.
+        List<Pair<DataBox, RecordId>> data = new ArrayList<>();
+        for (int i = 24; i <= 26; i++) {
+            data.add(new Pair<>(new IntDataBox(i), new RecordId(i, (short) i)));
+        }
+        inner.bulkLoad(data.iterator(), 0.75f);
+        assertEquals(3, inner.getKeys().size());
+        assertEquals(4, inner.getChildren().size());
+        for (int i = 21; i <= 26; i++) {
+            LeafNode leaf = inner.get(new IntDataBox(i));
+            assertEquals("key " + i + " should be findable", Optional.of(new RecordId(i, (short) i)), leaf.getKey(new IntDataBox(i)));
+        }
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testBulkLoadNoSplitWhenDataFitsInLastLeaf() {
+        // With fillFactor 0.75, fillFactorFull = 3. Leaf2 has [21,22,23]. Adding one more (24)
+        // makes the leaf split (left [21,22,23], right [24]). The inner absorbs the push-up
+        // (adds key 24 and the new child) and returns empty unless the inner itself splits.
+        List<Pair<DataBox, RecordId>> data = new ArrayList<>();
+        data.add(new Pair<>(new IntDataBox(24), new RecordId(24, (short) 24)));
+        Optional<Pair<DataBox, Long>> result = inner.bulkLoad(data.iterator(), 0.75f);
+        assertFalse("inner returns empty when it absorbs a push-up without splitting", result.isPresent());
+        assertEquals(3, inner.getKeys().size());
+        assertEquals(4, inner.getChildren().size());
+        assertEquals(Optional.of(new RecordId(21, (short) 21)), inner.get(new IntDataBox(21)).getKey(new IntDataBox(21)));
+        assertEquals(Optional.of(new RecordId(24, (short) 24)), inner.get(new IntDataBox(24)).getKey(new IntDataBox(24)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testGetAfterPutFromDisk() {
+        // Put then re-fetch inner from disk; get should still route correctly.
+        inner.put(new IntDataBox(5), new RecordId(5, (short) 5));
+        keys0.add(1, new IntDataBox(5));
+        rids0.add(1, new RecordId(5, (short) 5));
+        long innerPageNum = inner.getPage().getPageNum();
+        InnerNode fromDisk = InnerNode.fromBytes(metadata, bufferManager, treeContext, innerPageNum);
+        assertEquals(inner.getKeys(), fromDisk.getKeys());
+        assertEquals(inner.getChildren(), fromDisk.getChildren());
+        LeafNode leaf = fromDisk.get(new IntDataBox(5));
+        assertEquals(Optional.of(new RecordId(5, (short) 5)), leaf.getKey(new IntDataBox(5)));
+    }
+
+    @Test
+    @Category(PublicTests.class)
+    public void testRemoveThenGetFromDisk() {
+        inner.remove(new IntDataBox(2));
+        keys0.remove(1);
+        rids0.remove(1);
+        long innerPageNum = inner.getPage().getPageNum();
+        InnerNode fromDisk = InnerNode.fromBytes(metadata, bufferManager, treeContext, innerPageNum);
+        assertEquals(Optional.empty(), fromDisk.get(new IntDataBox(2)).getKey(new IntDataBox(2)));
+        assertEquals(Optional.of(new RecordId(1, (short) 1)), fromDisk.get(new IntDataBox(1)).getKey(new IntDataBox(1)));
     }
 }
