@@ -9,6 +9,10 @@ import edu.berkeley.cs186.database.table.Schema;
 import edu.berkeley.cs186.database.table.stats.TableStats;
 
 import java.util.*;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+
+import static java.lang.Math.min;
 
 public class SortOperator extends QueryOperator {
     protected Comparator<Record> comparator;
@@ -86,8 +90,19 @@ public class SortOperator extends QueryOperator {
      * iterator
      */
     public Run sortRun(Iterator<Record> records) {
-        // TODO(proj3_part1): implement
-        return null;
+        Run sortedRun = new Run(this.transaction, getSchema());
+        RecordComparator recordComparator = new RecordComparator();
+        StreamSupport
+                .stream(
+                        Spliterators.spliteratorUnknownSize(records, Spliterator.ORDERED),
+                        false
+                )
+                .sorted(recordComparator)
+                .forEach(record -> {
+                    sortedRun.add(record);
+                });
+
+        return sortedRun;
     }
 
     /**
@@ -107,8 +122,43 @@ public class SortOperator extends QueryOperator {
      */
     public Run mergeSortedRuns(List<Run> runs) {
         assert (runs.size() <= this.numBuffers - 1);
-        // TODO(proj3_part1): implement
-        return null;
+
+        Run result = new Run(this.transaction, getSchema());
+
+        List<BacktrackingIterator<Record>> runIteratorList = new ArrayList<>();
+        for(Run run: runs) {
+            runIteratorList.add(run.iterator());
+        }
+
+        RecordPairComparator recordPairComparator = new RecordPairComparator();
+        PriorityQueue<Pair<Record, Integer>> minHeap = new PriorityQueue<>(recordPairComparator);
+
+        for(int i = 0; i < runIteratorList.size(); i++) {
+            BacktrackingIterator<Record> iterator = runIteratorList.get(i);
+            if(iterator.hasNext()) {
+                Pair<Record, Integer> recordPair = new Pair<>(iterator.next(), i);
+                minHeap.add(recordPair);
+            }
+        }
+
+        while(!minHeap.isEmpty()) {
+            Pair<Record, Integer> top = minHeap.poll();
+
+            Record topRecord = top.getFirst();
+            Integer topRecordIdx = top.getSecond();
+
+            result.add(topRecord);
+            if(runIteratorList.get(topRecordIdx).hasNext()) {
+                Pair<Record, Integer> newRecordPair = new Pair<>(
+                        runIteratorList.get(topRecordIdx).next(),
+                        topRecordIdx
+                );
+
+                minHeap.add(newRecordPair);
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -132,8 +182,15 @@ public class SortOperator extends QueryOperator {
      * @return a list of sorted runs obtained by merging the input runs
      */
     public List<Run> mergePass(List<Run> runs) {
-        // TODO(proj3_part1): implement
-        return Collections.emptyList();
+        List<Run> result = new ArrayList<>();
+
+        // 0, 1, 2, 3, 4,....., runs.size()-1
+        for(int i = 0; numBuffers - 1 + i < runs.size() + 2; i += numBuffers - 1) {
+            List<Run> subbedList = runs.subList(i, min(numBuffers - 1 + i, runs.size()));
+            result.add(mergeSortedRuns(subbedList));
+        }
+
+        return result;
     }
 
     /**
@@ -148,8 +205,18 @@ public class SortOperator extends QueryOperator {
         // Iterator over the records of the relation we want to sort
         Iterator<Record> sourceIterator = getSource().iterator();
 
-        // TODO(proj3_part1): implement
-        return makeRun(); // TODO(proj3_part1): replace this!
+        List<Run> mergeRuns = new ArrayList<>();
+        while(sourceIterator.hasNext()) {
+            BacktrackingIterator<Record> blockIterator = QueryOperator.getBlockIterator(sourceIterator, getSchema(), numBuffers);
+            Run sortedRun = sortRun(blockIterator);
+            mergeRuns.add(sortedRun);
+        }
+
+        while(mergeRuns.size() > 1) {
+            mergePass(mergeRuns);
+        }
+
+        return mergeRuns.get(0);
     }
 
     /**
