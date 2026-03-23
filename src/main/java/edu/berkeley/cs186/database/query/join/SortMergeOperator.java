@@ -139,8 +139,75 @@ public class SortMergeOperator extends JoinOperator {
          * or null if there are no more records to join.
          */
         private Record fetchNextRecord() {
-            // TODO(proj3_part1): implement
-            return null;
+            /*
+            * Step-by-step flow
+              1. Base case
+                If leftRecord == null, no left rows remain, so return null (join done).
+
+              2. Alignment phase (if (!marked))
+                Move leftRecord forward while left key < right key.
+                Move rightRecord forward while left key > right key.
+                Once keys are aligned/equal, mark the current right position with markPrev().
+                Set marked = true.
+                This corresponds to “find first a pair of equal join keys”.
+
+              3. If keys are equal (compare(...) == 0)
+                Create joined output: leftRecord.concat(rightRecord).
+                Then advance state for next output:
+                If right is exhausted, advance left once and reset right to the mark (replay right block for next left with same key).
+                Then advance rightRecord = rightIterator.next().
+                Return the joined record immediately.
+                This is the cartesian pairing inside one equal-key group.
+
+              4. If keys are not equal after being in marked mode
+                That means current left key’s matching right block is done.
+                Reset right iterator to the mark.
+                Advance left once.
+                Clear marked so next call re-aligns to next key group.
+                Reset right again and set rightRecord to first record in that block.
+                Recurse (return fetchNextRecord()) to continue searching for next match.
+            * */
+
+            if(leftRecord == null) {
+                return null;
+            }
+
+            if(!marked) {
+                while(compare(leftRecord, rightRecord) < 0) leftRecord = leftIterator.next();
+                while (compare(leftRecord, rightRecord) > 0) rightRecord = rightIterator.next();
+
+                // mark start of block for rightRecord
+                marked = true;
+                rightIterator.markPrev();
+            }
+
+            if(compare(leftRecord, rightRecord) == 0) {
+                Record result = leftRecord.concat(rightRecord);
+
+                if (!rightIterator.hasNext()) {
+                    if (leftIterator.hasNext()) {
+                        leftRecord = leftIterator.next();
+                    } else {
+                        leftRecord = null;
+                    }
+                    rightIterator.reset();
+                }
+                rightRecord = rightIterator.next();
+
+                return result;
+            }
+
+            rightIterator.reset();
+
+            if(leftIterator.hasNext()) {
+                leftRecord = leftIterator.next();
+            } else leftRecord = null;
+
+            marked = false;
+            rightIterator.reset();
+            rightRecord = rightIterator.next();
+
+            return fetchNextRecord();
         }
 
         @Override
